@@ -23,13 +23,22 @@ import (
 
 // Button represents a button GUI element
 type Button struct {
-	Panel                   // Embedded Panel
-	Label     *Label        // Label panel
-	image     *Image        // pointer to button image (may be nil)
-	icon      *Label        // pointer to button icon (may be nil
-	styles    *ButtonStyles // pointer to current button styles
-	mouseOver bool          // true if mouse is over button
-	pressed   bool          // true if button is pressed
+	*Panel                   // Embedded Panel
+	Label     *Label         // Label panel
+	image     *Image         // pointer to button image (may be nil)
+	icon      *Label         // pointer to button icon (may be nil
+	styles    *ButtonStyles  // pointer to current button styles
+	mouseOver bool           // true if mouse is over button
+	selected  bool           // true if button is selected
+	toggle    bool           // true if button is a toggle button
+	groups    []*ToggleGroup // Slice of pointers to all toggle groups the button is a member of
+}
+
+// ToggleGroup holds only toggle buttons and ensures
+// that at most one of them is selected at a time
+type ToggleGroup struct {
+	members            []*Button // Slice of pointers to the toggle button members
+	DeselectingAllowed bool      // Whether deselecting is allowed for its members
 }
 
 // ButtonStyle contains the styling of a Button
@@ -49,17 +58,17 @@ type ButtonStyles struct {
 func NewButton(text string) *Button {
 
 	b := new(Button)
+	b.toggle = false
 	b.styles = &StyleDefault().Button
 
 	// Initializes the button panel
-	b.Panel.Initialize(b, 0, 0)
+	b.Panel = NewPanel(0, 0)
 
 	// Subscribe to panel events
 	b.Subscribe(OnKeyDown, b.onKey)
 	b.Subscribe(OnKeyUp, b.onKey)
 	b.Subscribe(OnMouseUp, b.onMouse)
 	b.Subscribe(OnMouseDown, b.onMouse)
-	b.Subscribe(OnMouseUpOut, b.onMouse)
 	b.Subscribe(OnCursor, b.onCursor)
 	b.Subscribe(OnCursorEnter, b.onCursor)
 	b.Subscribe(OnCursorLeave, b.onCursor)
@@ -74,6 +83,104 @@ func NewButton(text string) *Button {
 	b.recalc() // recalc first then update!
 	b.update()
 	return b
+}
+
+// NewToggleButton creates and returns a pointer to a new toggle button widget
+// with the specified text for the toggle button label.
+func NewToggleButton(text string) *Button {
+
+	b := NewButton(text)
+	b.toggle = true
+	b.styles = &StyleDefault().ToggleButton
+
+	return b
+}
+
+// NewToggleGroup creates and returns a pointer to a new toggle group.
+func NewToggleGroup(allowDeselecting bool) *ToggleGroup {
+	tg := new(ToggleGroup)
+	tg.DeselectingAllowed = allowDeselecting
+	return tg
+}
+
+// Add adds the given button to the members of this toggle group if it is
+// not already contained and is indeed a toggle button, in which case true is returned.
+// Otherwise nothing happens and false is returned.
+func (tg *ToggleGroup) Add(toggleButton *Button) bool {
+	if !toggleButton.toggle || tg.Contains(toggleButton) {
+		return false
+	}
+	tg.members = append(tg.members, toggleButton)
+	toggleButton.groups = append(toggleButton.groups, tg)
+	return true
+}
+
+// Remove removes the given button from the members of this toggle group if it is
+// contained, in which case true is returned.
+// Otherwise nothing happens and false is returned.
+func (tg *ToggleGroup) Remove(button *Button) bool {
+	for i, b := range tg.members {
+		if b == button {
+			tg.members = append(tg.members[:i], tg.members[i+1:]...)
+			for i, g := range button.groups {
+				if g == tg {
+					button.groups = append(button.groups[:i], button.groups[i+1:]...)
+					return true
+				}
+			}
+		}
+	}
+	return false
+}
+
+// Contains returns true if the given button is a member of this toggle group.
+// Otherwise false is returned.
+func (tg *ToggleGroup) Contains(button *Button) bool {
+	for _, b := range tg.members {
+		if b == button {
+			return true
+		}
+	}
+	return false
+}
+
+// deselectOthers deselects all buttons contained in this toggle group except the
+// given one.
+func (tg *ToggleGroup) deselectOthers(button *Button) {
+	for _, b := range tg.members {
+		if b != button {
+			if b.selected {
+				b.selected = false
+				b.update()
+			}
+		}
+	}
+}
+
+// deselectingAllowed returns true if none of all toggle groups this button is a member of
+// disallows deselecting. Otherwise false is returned.
+func (b *Button) deselectingAllowed() bool {
+	for _, g := range b.groups {
+		if !g.DeselectingAllowed {
+			return false
+		}
+	}
+	return true
+}
+
+// IsSelected returns true if the button is selected, otherwise false.
+func (b *Button) IsSelected() bool {
+	return b.selected
+}
+
+// Press presses the button as if it were initiated by a mouse click.
+func (b *Button) Press() {
+	b.selected = true
+	for _, g := range b.groups {
+		g.deselectOthers(b)
+	}
+	b.update()
+	b.Dispatch(OnClick, nil)
 }
 
 // SetIcon sets the button icon from the default Icon font.
@@ -128,6 +235,9 @@ func (b *Button) onCursor(evname string, ev interface{}) {
 		b.mouseOver = true
 		b.update()
 	case OnCursorLeave:
+		if !b.toggle {
+			b.selected = false
+		}
 		b.mouseOver = false
 		b.update()
 	}
@@ -136,22 +246,21 @@ func (b *Button) onCursor(evname string, ev interface{}) {
 // onMouseEvent process subscribed mouse events
 func (b *Button) onMouse(evname string, ev interface{}) {
 
-	if !b.Enabled() {
-		return
-	}
-
 	switch evname {
 	case OnMouseDown:
 		Manager().SetKeyFocus(b)
-		b.pressed = true
-		b.update()
-	case OnMouseUpOut:
-		fallthrough
-	case OnMouseUp:
-		if b.pressed && b.mouseOver {
-			b.Dispatch(OnClick, nil)
+		if !b.toggle {
+			b.Press()
+		} else if !b.selected {
+			b.Press()
+		} else if b.deselectingAllowed() {
+			b.selected = false
+			b.update()
 		}
-		b.pressed = false
+	case OnMouseUp:
+		if !b.toggle {
+			b.selected = false
+		}
 		b.update()
 	default:
 		return
@@ -162,18 +271,25 @@ func (b *Button) onMouse(evname string, ev interface{}) {
 func (b *Button) onKey(evname string, ev interface{}) {
 
 	kev := ev.(*window.KeyEvent)
-	if kev.Key != window.KeyEnter {
-		return
+	if evname == OnKeyDown && kev.Key == window.KeyEnter {
+		if !b.toggle {
+			b.Press()
+		} else if !b.selected {
+			b.Press()
+		} else if b.deselectingAllowed() {
+			b.selected = false
+			b.update()
+		}
+return
 	}
-	switch evname {
-	case OnKeyDown:
-		b.pressed = true
+	if evname == OnKeyUp && kev.Key == window.KeyEnter {
+		if !b.toggle {
+			b.selected = false
+		}
 		b.update()
-		b.Dispatch(OnClick, nil)
-	case OnKeyUp:
-		b.pressed = false
-		b.update()
+return
 	}
+	return
 }
 
 // update updates the button visual state
@@ -183,7 +299,7 @@ func (b *Button) update() {
 		b.applyStyle(&b.styles.Disabled)
 		return
 	}
-	if b.pressed && b.mouseOver {
+	if b.selected {
 		b.applyStyle(&b.styles.Pressed)
 		return
 	}

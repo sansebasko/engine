@@ -37,6 +37,10 @@ const (
 	OnKeyUp     = window.OnKeyUp     // A key is released
 	OnKeyRepeat = window.OnKeyRepeat // A key was pressed and is now automatically repeating
 	OnChar      = window.OnChar      // A unicode key is pressed
+
+	OnBeforeRender = "gui.OnAfterRender" // dispatched just before rendering the scene/gui
+	OnAfterRender  = "gui.OnAfterRender" // dispatched just after rendering the scene/gui
+	OnQuit         = "gui.OnQuit"        // the user tries to close the window or the application.Quit() method is called
 )
 
 const (

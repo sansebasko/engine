@@ -10,6 +10,8 @@ import (
 	"fmt"
 	"github.com/g3n/engine/audio/al"
 	"github.com/g3n/engine/audio/vorbis"
+	"github.com/g3n/engine/core"
+	"github.com/g3n/engine/gui"
 	"github.com/g3n/engine/renderer"
 	"github.com/g3n/engine/window"
 	"time"
@@ -26,6 +28,7 @@ const (
 type Application struct {
 	window.IWindow                    // Embedded GlfwWindow
 	keyState       *window.KeyState   // Keep track of keyboard state
+	mouseState     *window.MouseState // Keep track of mouse state
 	renderer       *renderer.Renderer // Renderer object
 	audioDev       *al.Device         // Default audio device
 	startTime      time.Time          // Application start time
@@ -47,8 +50,9 @@ func App() *Application {
 		panic(err)
 	}
 	a.IWindow = window.Get()
-	a.openDefaultAudioDevice()         // Set up audio
-	a.keyState = window.NewKeyState(a) // Create KeyState
+	a.openDefaultAudioDevice()             // Set up audio
+	a.keyState = window.NewKeyState(a)     // Create KeyState
+	a.mouseState = window.NewMouseState(a) // Create MouseState
 	// Create renderer and add default shaders
 	a.renderer = renderer.NewRenderer(a.Gls())
 	err = a.renderer.AddDefaultShaders()
@@ -83,8 +87,16 @@ func (a *Application) Run(update func(rend *renderer.Renderer, deltaTime time.Du
 		now := time.Now()
 		a.frameDelta = now.Sub(a.frameStart)
 		a.frameStart = now
+		// Dispatch before render event
+		a.Dispatch(gui.OnBeforeRender, nil)
+		//dispatchRecursive(gui.OnBeforeRender, nil, a.scene.Children())
+		//dispatchRecursive(gui.OnBeforeRender, nil, a.guiroot.Children())
 		// Call user's update function
 		update(a.renderer, a.frameDelta)
+		// Dispatch after render event
+		a.Dispatch(gui.OnAfterRender, nil)
+		//dispatchRecursive(gui.OnAfterRender, nil, a.scene.Children())
+		//dispatchRecursive(gui.OnAfterRender, nil, a.guiroot.Children())
 		// Swap buffers and poll events
 		a.IWindow.(*window.GlfwWindow).SwapBuffers()
 		a.IWindow.(*window.GlfwWindow).PollEvents()
@@ -96,6 +108,17 @@ func (a *Application) Run(update func(rend *renderer.Renderer, deltaTime time.Du
 	}
 	// Destroy window
 	a.Destroy()
+}
+
+func dispatchRecursive(evname string, ev interface{}, nodes []core.INode) bool {
+	for _, node := range nodes {
+		if node != nil {
+			if node.Dispatch(evname, ev) != 0 || dispatchRecursive(evname, ev, node.Children()) {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 // Exit requests to terminate the application
@@ -116,6 +139,12 @@ func (a *Application) Renderer() *renderer.Renderer {
 func (a *Application) KeyState() *window.KeyState {
 
 	return a.keyState
+}
+
+// MouseState returns the application's MouseState.
+func (a *Application) MouseState() *window.MouseState {
+
+	return a.mouseState
 }
 
 // RunTime returns the elapsed duration since the call to Run().

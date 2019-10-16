@@ -7,6 +7,7 @@ package gui
 import (
 	"fmt"
 	"math"
+	"reflect"
 	"sort"
 	"strconv"
 
@@ -87,6 +88,7 @@ type TableColumn struct {
 	Minwidth   float32         // Minimum width in pixels for this column
 	Hidden     bool            // Hidden flag
 	Align      Align           // Cell content alignment: AlignLeft|AlignCenter|AlignRight
+	Fill       bool            // Whether cell content fills the cell (default false, overrides Align if true)
 	Format     string          // Format string for formatting the columns' cells
 	FormatFunc TableFormatFunc // Format function (overrides Format string)
 	Expand     float32         // Column width expansion factor (0 for no expansion)
@@ -165,6 +167,7 @@ type tableColHeader struct {
 	format     string          // column format string
 	formatFunc TableFormatFunc // column format function
 	align      Align           // column alignment
+	fill       bool            // column fill
 	expand     float32         // column expand factor
 	sort       TableSortType   // column sort type
 	resize     bool            // column can be resized by user
@@ -187,6 +190,8 @@ type tableCell struct {
 	label Label       // cell label
 	value interface{} // cell current value
 }
+
+var zeroValue = reflect.Value{}
 
 // NewTable creates and returns a pointer to a new Table with the
 // specified width, height and columns
@@ -229,6 +234,7 @@ func NewTable(width, height float32, cols []TableColumn) (*Table, error) {
 			c.width = c.minWidth
 		}
 		c.align = cdesc.Align
+		c.fill = cdesc.Fill
 		c.format = cdesc.Format
 		c.formatFunc = cdesc.FormatFunc
 		c.expand = cdesc.Expand
@@ -514,6 +520,22 @@ func (t *Table) InsertRow(row int, values map[string]interface{}) {
 	t.Dispatch(OnTableRowCount, nil)
 }
 
+// SwitchRows switches the specified rows
+func (t *Table) SwitchRows(row1, row2 int) {
+	// Checks row1 index
+	if row1 < 0 || row1 >= len(t.rows) {
+		panic(tableErrInvRow)
+	}
+	// Checks row2 index
+	if row2 < 0 || row2 >= len(t.rows) {
+		panic(tableErrInvRow)
+	}
+
+	t.rows[row1], t.rows[row2] = t.rows[row2], t.rows[row1]
+	t.recalc()
+	t.Dispatch(OnChange, nil)
+}
+
 // RemoveRow removes from the specified row from the table
 func (t *Table) RemoveRow(row int) {
 
@@ -693,14 +715,50 @@ func (t *Table) insertRow(row int, values map[string]interface{}) {
 	trow := new(tableRow)
 	trow.Initialize(trow, 0, 0)
 	trow.cells = make([]*tableCell, 0)
-	for ci := 0; ci < len(t.header.cols); ci++ {
+	for _, col := range t.header.cols {
 		// Creates tableRow cell panel
+		v := values[col.id]
 		cell := new(tableCell)
 		cell.Initialize(cell, 0, 0)
-		cell.label.initialize("", StyleDefault().Font)
-		cell.Add(&cell.label)
+
 		trow.cells = append(trow.cells, cell)
 		trow.Panel.Add(cell)
+
+		cell.label.initialize("", StyleDefault().Font)
+
+		if col.fill {
+			cell.Panel.SetLayout(NewDockLayout())
+		}
+
+		value := reflect.ValueOf(v)
+		if value.CanInterface() {
+			ipanel, ok := value.Interface().(IPanel)
+			if ok {
+				strct := value
+				if strct.Kind() == reflect.Ptr {
+					strct = strct.Elem()
+				}
+				if strct.Kind() == reflect.Struct {
+					f := strct.FieldByName("Panel")
+					if f != zeroValue {
+						if f.Kind() != reflect.Ptr {
+							f = f.Addr()
+						}
+						p := f.Interface().(*Panel)
+						if col.fill {
+							p.SetLayoutParams(&DockLayoutParams{DockCenter})
+						}
+						cell.Panel.Add(ipanel)
+						continue
+					}
+				}
+			}
+		}
+
+		if col.fill {
+			cell.label.SetLayoutParams(&DockLayoutParams{DockCenter})
+		}
+		cell.Add(&cell.label)
 	}
 	t.Panel.Add(trow)
 
@@ -840,9 +898,26 @@ func (t *Table) onMouse(evname string, ev interface{}) {
 		t.findClick(&tce)
 		// If row is clicked, selects it
 		if tce.Row >= 0 && e.Button == window.MouseButtonLeft {
+			if e.Mods == 0 {
+				for ri := 0; ri < len(t.rows); ri++ {
+					t.deselectRow(ri)
+				}
+			}
+			if t.selType == TableSelMultiRow && e.Mods == window.ModShift && t.rowCursor >= 0 {
+				min := tce.Row
+				max := t.rowCursor
+				if min > max {
+					min, max = max, min
+				}
+				for i := min; i <= max; i++ {
+					t.selectRow(i)
+				}
+			}
 			t.rowCursor = tce.Row
 			if t.selType == TableSelMultiRow && e.Mods == window.ModControl {
 				t.toggleRowSel(t.rowCursor)
+			} else {
+				t.selectRow(t.rowCursor)
 			}
 			t.recalc()
 			t.Dispatch(OnChange, nil)
@@ -1097,16 +1172,68 @@ func (t *Table) lastPage() {
 	t.Dispatch(OnChange, nil)
 }
 
+// deselectRow deselects the specified row.
+// Should be used only when multi row selection is enabled
+func (t *Table) deselectRow(ri int) {
+
+	trow := t.rows[ri]
+	if trow.selected {
+		trow.selected = false
+		t.Dispatch(OnChange, nil)
+	}
+}
+
+// SelectRows selects the specified rows.
+func (t *Table) SelectRows(rows ...int) bool {
+	if len(rows) == 0 {
+		return false
+	}
+
+	// Deselect all no affected rows
+	ss := t.SelectedRows()
+	for _, r := range ss {
+		if containsInt(rows, r) {
+			continue
+		}
+		t.toggleRowSel(r)
+	}
+
+	var r int
+	if t.selType == TableSelSingleRow {
+		// Select last specified valid row
+		for i := len(rows) - 1; i >= 0; i-- {
+			r = rows[i]
+			if r < 0 || r >= len(t.rows) {
+				continue
+			}
+			t.selectRow(r)
+			return true
+		}
+		return false
+	}
+
+	// Select all specified valid rows
+	for _, r := range rows {
+		if r < 0 || r >= len(t.rows) {
+			continue
+		}
+		t.selectRow(r)
+	}
+	return true
+}
+
 // selectRow selects the specified row.
 // Should be used only when multi row selection is enabled
 func (t *Table) selectRow(ri int) {
 
 	trow := t.rows[ri]
-	trow.selected = true
-	t.Dispatch(OnChange, nil)
+	if !trow.selected {
+		trow.selected = true
+		t.Dispatch(OnChange, nil)
+	}
 }
 
-// toggleRowSel toogles the specified row selection state
+// toggleRowSel toggles the specified row selection state
 // Should be used only when multi row selection is enabled
 func (t *Table) toggleRowSel(ri int) {
 
@@ -1393,24 +1520,66 @@ func (t *Table) recalcRow(ri int) {
 			text := c.formatFunc(TableCell{t, ri, c.id, cell.value})
 			cell.label.SetText(text)
 		}
+
+		px += c.Width()
+
+		if c.fill {
+			continue
+		}
+
 		// Sets the cell label alignment inside the cell
+		vw := cell.label.width
+
+		value := reflect.ValueOf(cell.value)
+		strct := value
+		if strct.Kind() == reflect.Ptr {
+			strct = strct.Elem()
+		}
+		if value != zeroValue && value.CanInterface() && strct.Kind() == reflect.Struct {
+			_, ok := value.Interface().(IPanel)
+			if ok {
+				f := strct.FieldByName("Panel")
+				if f != zeroValue {
+					if f.Kind() != reflect.Ptr {
+						f = f.Addr()
+					}
+					p := f.Interface().(*Panel)
+					vw = p.width
+				}
+			}
+		}
+
 		ccw := cell.ContentWidth()
-		lw := cell.label.Width()
-		space := ccw - lw
-		lx := float32(0)
+		space := ccw - vw
+		x := float32(0)
 		switch c.align {
 		case AlignLeft:
 		case AlignRight:
 			if space > 0 {
-				lx = ccw - lw
+				x = ccw - vw
 			}
 		case AlignCenter:
 			if space > 0 {
-				lx = space / 2
+				x = space / 2
 			}
 		}
-		cell.label.SetPosition(lx, 0)
-		px += c.Width()
+
+		if value != zeroValue && value.CanInterface() && strct.Kind() == reflect.Struct {
+			_, ok := value.Interface().(IPanel)
+			if ok {
+				f := strct.FieldByName("Panel")
+				if f != zeroValue {
+					if f.Kind() != reflect.Ptr {
+						f = f.Addr()
+					}
+					p := f.Interface().(*Panel)
+					p.SetPosition(x, 0)
+				}
+			}
+			continue
+		}
+
+		cell.label.SetPosition(x, 0)
 	}
 	trow.SetContentWidth(px)
 }
@@ -1530,9 +1699,7 @@ func (t *Table) updateRowStyle(ri int) {
 
 	row := t.rows[ri]
 	var trs TableRowStyle
-	if ri == t.rowCursor {
-		trs = t.styles.RowCursor
-	} else if row.selected {
+	if row.selected {
 		trs = t.styles.RowSel
 	} else {
 		if ri%2 == 0 {
@@ -1661,4 +1828,13 @@ func cv2f64(v interface{}) float64 {
 	default:
 		return 0
 	}
+}
+
+func containsInt(ii []int, i int) bool {
+	for _, I := range ii {
+		if I == i {
+			return true
+		}
+	}
+	return false
 }
